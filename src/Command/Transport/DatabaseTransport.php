@@ -4,16 +4,19 @@ declare(strict_types=1);
 
 namespace Componenta\CQRS\Command\Transport;
 
-use Throwable;
-use InvalidArgumentException;
+use Cycle\Database\DatabaseInterface;
+use Cycle\Database\Query\OnConflict;
+use Cycle\Database\Query\SelectQuery;
 use DateTimeImmutable;
 use DateTimeZone;
-use Cycle\Database\DatabaseInterface;
+use InvalidArgumentException;
+use Throwable;
 
 /**
  * Cycle-backed transport implementation.
  *
- * Uses auto-increment ID as receiptHandle.
+ * Uses an opaque `<row-id>:<lease-token>` receipt handle for claimed messages.
+ * Completed and failed rows are retained as idempotency tombstones.
  *
  * Schema:
  * ```sql
@@ -25,8 +28,12 @@ use Cycle\Database\DatabaseInterface;
  *     payload TEXT NOT NULL,
  *     available_at TIMESTAMP NOT NULL,
  *     delivered_at TIMESTAMP NULL,
+ *     lease_token VARCHAR(32) NULL,
+ *     completed_at TIMESTAMP NULL,
+ *     failed_at TIMESTAMP NULL,
  *     created_at TIMESTAMP NOT NULL,
- *     INDEX idx_queue_fetch (queue, available_at, delivered_at)
+ *     UNIQUE KEY uq_command_transport_operation (queue, operation_id),
+ *     INDEX idx_queue_fetch (queue, completed_at, failed_at, available_at, delivered_at)
  * );
  *
  * CREATE TABLE command_transport_failed (
@@ -36,6 +43,7 @@ use Cycle\Database\DatabaseInterface;
  *     command_class VARCHAR(255) NOT NULL,
  *     payload TEXT NOT NULL,
  *     failed_at TIMESTAMP NOT NULL,
+ *     UNIQUE KEY uq_command_transport_failed_operation (queue, operation_id),
  *     INDEX idx_failed_queue (queue, failed_at)
  * );
  * ```
@@ -44,6 +52,7 @@ final readonly class DatabaseTransport implements TransportInterface
 {
     private const string TABLE = 'command_transport';
     private const string FAILED_TABLE = 'command_transport_failed';
+    private const int CLAIM_ATTEMPTS = 3;
 
     /**
      * @param DatabaseInterface $database Cycle connection
@@ -68,25 +77,52 @@ final readonly class DatabaseTransport implements TransportInterface
 
     public function send(Envelope $envelope, int $delay = 0): Envelope
     {
-        $now = new DateTimeImmutable('now', new DateTimeZone('UTC'));
-        $delay = max(0, $delay);
+        if ($delay < 0) {
+            throw new InvalidArgumentException('Transport delay must be non-negative.');
+        }
+
+        $now = self::now();
         $availableAt = $delay > 0
             ? $now->modify("+{$delay} seconds")
             : $now;
 
-        $id = $this->database->insert(self::TABLE)->values([
+        $this->database->insert(self::TABLE)->values([
             'queue' => $this->name,
             'operation_id' => $envelope->operationId,
             'command_class' => $envelope->commandClass,
             'payload' => $envelope->payload,
-            'available_at' => $availableAt->format('Y-m-d H:i:s'),
+            'available_at' => self::format($availableAt),
             'delivered_at' => null,
-            'created_at' => $now->format('Y-m-d H:i:s'),
-        ])->run();
+            'lease_token' => null,
+            'completed_at' => null,
+            'failed_at' => null,
+            'created_at' => self::format($now),
+        ])->onConflict(
+            OnConflict::target(['queue', 'operation_id'])->doNothing(),
+        )->run();
 
+        $row = $this->database->select(['id', 'command_class', 'payload'])
+            ->from(self::TABLE)
+            ->where('queue', $this->name)
+            ->where('operation_id', $envelope->operationId)
+            ->limit(1)
+            ->run()
+            ->fetch();
 
-        if ($id === null) {
-            throw new TransportException('Failed to get last insert ID');
+        if (!is_array($row)) {
+            throw new TransportException('Transport operation was not persisted.');
+        }
+
+        $id = self::rowId($row);
+        $commandClass = self::rowString($row, 'command_class');
+        $payload = self::rowString($row, 'payload');
+
+        if ($commandClass !== $envelope->commandClass || $payload !== $envelope->payload) {
+            throw new TransportException(sprintf(
+                'Operation ID "%s" is already used by a different command payload in queue "%s".',
+                $envelope->operationId,
+                $this->name,
+            ));
         }
 
         return $envelope->withReceiptHandle($id);
@@ -94,15 +130,38 @@ final readonly class DatabaseTransport implements TransportInterface
 
     public function get(): ?Envelope
     {
-        $now = new DateTimeImmutable('now', new DateTimeZone('UTC'));
-        $redeliverLimit = $now->modify("-$this->redeliverTimeout seconds")->format('Y-m-d H:i:s');
-        $nowFormatted = $now->format('Y-m-d H:i:s');
+        for ($attempt = 0; $attempt < self::CLAIM_ATTEMPTS; ++$attempt) {
+            $result = $this->getAttempt();
 
-        $row = $this->database->select()
+            if ($result !== false) {
+                return $result;
+            }
+        }
+
+        return null;
+    }
+
+    /** @return Envelope|false|null False means that another consumer won the claim race. */
+    private function getAttempt(): Envelope|false|null
+    {
+        $now = self::now();
+        $redeliverLimit = self::format($now->modify("-{$this->redeliverTimeout} seconds"));
+        $nowFormatted = self::format($now);
+
+        $row = $this->database->select([
+            'id',
+            'operation_id',
+            'command_class',
+            'payload',
+            'delivered_at',
+            'lease_token',
+        ])
             ->from(self::TABLE)
             ->where('queue', $this->name)
+            ->where('completed_at', null)
+            ->where('failed_at', null)
             ->where('available_at', '<=', $nowFormatted)
-            ->where(static function ($query) use ($redeliverLimit): void {
+            ->where(static function (SelectQuery $query) use ($redeliverLimit): void {
                 $query->where('delivered_at', null)
                     ->orWhere('delivered_at', '<', $redeliverLimit);
             })
@@ -111,76 +170,254 @@ final readonly class DatabaseTransport implements TransportInterface
             ->run()
             ->fetch();
 
-        if (!$row) {
+        if (!is_array($row)) {
             return null;
         }
 
-        $claimed = $this->claim($row['id'], $row['delivered_at'], $nowFormatted);
+        $id = self::rowId($row);
+        $operationId = self::rowString($row, 'operation_id');
+        $commandClass = self::rowString($row, 'command_class');
+        $payload = self::rowString($row, 'payload');
+        $oldDeliveredAt = self::rowNullableString($row, 'delivered_at');
+        $oldLeaseToken = self::rowNullableString($row, 'lease_token');
 
-        if ($claimed === 0) {
-            return null;
+        try {
+            $leaseToken = bin2hex(random_bytes(16));
+        } catch (Throwable $exception) {
+            throw new TransportException(
+                'Failed to generate a transport lease token.',
+                previous: $exception,
+            );
+        }
+
+        if ($this->claim(
+            $id,
+            $oldDeliveredAt,
+            $oldLeaseToken,
+            $nowFormatted,
+            $leaseToken,
+        ) === 0) {
+            return false;
         }
 
         return new Envelope(
-            operationId: $row['operation_id'],
-            commandClass: $row['command_class'],
-            payload: $row['payload'],
-            receiptHandle: $row['id'],
+            operationId: $operationId,
+            commandClass: $commandClass,
+            payload: $payload,
+            receiptHandle: "{$id}:{$leaseToken}",
         );
     }
 
     public function ack(Envelope $envelope): void
     {
-        if ($envelope->receiptHandle === null) {
-            return;
-        }
+        [$id, $leaseToken] = self::parseReceiptHandle($envelope->receiptHandle);
 
-        $this->database->delete(self::TABLE)
-            ->where('id', $envelope->receiptHandle)
+        $updated = $this->database->update(self::TABLE)
+            ->where('id', $id)
+            ->where('queue', $this->name)
+            ->where('operation_id', $envelope->operationId)
+            ->where('command_class', $envelope->commandClass)
+            ->where('payload', $envelope->payload)
+            ->where('lease_token', $leaseToken)
+            ->where('completed_at', null)
+            ->where('failed_at', null)
+            ->values([
+                'completed_at' => self::format(self::now()),
+                'lease_token' => null,
+            ])
             ->run();
+
+        if ($updated === 0 && !$this->hasDisposition($id, $envelope, 'completed_at')) {
+            throw new TransportException('Cannot acknowledge a stale or invalid transport receipt handle.');
+        }
     }
 
     public function reject(Envelope $envelope): void
     {
-        if ($envelope->receiptHandle === null) {
-            return;
+        [$id, $leaseToken] = self::parseReceiptHandle($envelope->receiptHandle);
+        $failedAt = self::format(self::now());
+
+        if (!$this->database->begin()) {
+            throw new TransportException('Failed to begin the transport rejection transaction.');
         }
 
-        $this->database->begin();
-
         try {
-            $deleted = $this->database->delete(self::TABLE)
-                ->where('id', $envelope->receiptHandle)
+            $updated = $this->database->update(self::TABLE)
+                ->where('id', $id)
+                ->where('queue', $this->name)
+                ->where('operation_id', $envelope->operationId)
+                ->where('command_class', $envelope->commandClass)
+                ->where('payload', $envelope->payload)
+                ->where('lease_token', $leaseToken)
+                ->where('completed_at', null)
+                ->where('failed_at', null)
+                ->values([
+                    'failed_at' => $failedAt,
+                    'lease_token' => null,
+                ])
                 ->run();
 
-            if ($deleted > 0) {
-                $this->database->insert(self::FAILED_TABLE)->values([
-                    'queue' => $this->name,
-                    'operation_id' => $envelope->operationId,
-                    'command_class' => $envelope->commandClass,
-                    'payload' => $envelope->payload,
-                    'failed_at' => (new DateTimeImmutable('now', new DateTimeZone('UTC')))->format('Y-m-d H:i:s'),
-                ])->run();
+            if ($updated === 0) {
+                if ($this->hasDisposition($id, $envelope, 'failed_at')) {
+                    if (!$this->database->commit()) {
+                        throw new TransportException(
+                            'Failed to commit the idempotent transport rejection transaction.',
+                        );
+                    }
+
+                    return;
+                }
+
+                throw new TransportException('Cannot reject a stale or invalid transport receipt handle.');
             }
 
-            $this->database->commit();
-        } catch (Throwable $e) {
-            $this->database->rollback();
-            throw $e;
+            $this->database->insert(self::FAILED_TABLE)->values([
+                'queue' => $this->name,
+                'operation_id' => $envelope->operationId,
+                'command_class' => $envelope->commandClass,
+                'payload' => $envelope->payload,
+                'failed_at' => $failedAt,
+            ])->onConflict(
+                OnConflict::target(['queue', 'operation_id'])->doNothing(),
+            )->run();
+
+            if (!$this->database->commit()) {
+                throw new TransportException('Failed to commit the transport rejection transaction.');
+            }
+        } catch (Throwable $exception) {
+            try {
+                if (!$this->database->rollback()) {
+                    throw new TransportException(
+                        'Transport rejection rollback returned false.',
+                    );
+                }
+            } catch (Throwable $rollbackFailure) {
+                throw new DatabaseTransportRollbackException(
+                    $exception,
+                    $rollbackFailure,
+                );
+            }
+
+            throw $exception;
         }
     }
 
-    private function claim(string|int $id, ?string $oldDeliveredAt, string $newDeliveredAt): int
-    {
+    private function claim(
+        string $id,
+        ?string $oldDeliveredAt,
+        ?string $oldLeaseToken,
+        string $newDeliveredAt,
+        string $newLeaseToken,
+    ): int {
         $query = $this->database->update(self::TABLE)
-            ->where('id', $id);
+            ->where('id', $id)
+            ->where('queue', $this->name)
+            ->where('completed_at', null)
+            ->where('failed_at', null);
 
-        if ($oldDeliveredAt === null) {
-            $query->where('delivered_at', null);
-        } else {
-            $query->where('delivered_at', $oldDeliveredAt);
+        $oldDeliveredAt === null
+            ? $query->where('delivered_at', null)
+            : $query->where('delivered_at', $oldDeliveredAt);
+        $oldLeaseToken === null
+            ? $query->where('lease_token', null)
+            : $query->where('lease_token', $oldLeaseToken);
+
+        return $query->values([
+            'delivered_at' => $newDeliveredAt,
+            'lease_token' => $newLeaseToken,
+        ])->run();
+    }
+
+    private function hasDisposition(string $id, Envelope $envelope, string $column): bool
+    {
+        $row = $this->database->select([$column])
+            ->from(self::TABLE)
+            ->where('id', $id)
+            ->where('queue', $this->name)
+            ->where('operation_id', $envelope->operationId)
+            ->where('command_class', $envelope->commandClass)
+            ->where('payload', $envelope->payload)
+            ->limit(1)
+            ->run()
+            ->fetch();
+
+        return is_array($row) && is_string($row[$column] ?? null);
+    }
+
+    /**
+     * @param array<array-key, mixed> $row
+     * @return non-empty-string
+     */
+    private static function rowId(array $row): string
+    {
+        $id = $row['id'] ?? null;
+
+        if (is_int($id) && $id > 0) {
+            return (string) $id;
         }
 
-        return $query->values(['delivered_at' => $newDeliveredAt])->run();
+        if (is_string($id) && preg_match('/^[1-9][0-9]*$/D', $id) === 1) {
+            return $id;
+        }
+
+        throw new TransportException('Transport row contains an invalid ID.');
+    }
+
+    /**
+     * @param array<array-key, mixed> $row
+     */
+    private static function rowString(array $row, string $column): string
+    {
+        $value = $row[$column] ?? null;
+
+        if (!is_string($value)) {
+            throw new TransportException(sprintf(
+                'Transport row column "%s" must be a string.',
+                $column,
+            ));
+        }
+
+        return $value;
+    }
+
+    /**
+     * @param array<array-key, mixed> $row
+     */
+    private static function rowNullableString(array $row, string $column): ?string
+    {
+        $value = $row[$column] ?? null;
+
+        if ($value !== null && !is_string($value)) {
+            throw new TransportException(sprintf(
+                'Transport row column "%s" must be a string or null.',
+                $column,
+            ));
+        }
+
+        return $value;
+    }
+
+    /**
+     * @return array{non-empty-string, non-empty-string}
+     */
+    private static function parseReceiptHandle(string|int|null $receiptHandle): array
+    {
+        if (!is_string($receiptHandle)
+            || preg_match('/^([1-9][0-9]*):([a-f0-9]{32})$/D', $receiptHandle, $match) !== 1
+        ) {
+            throw new TransportException('Transport receipt handle is missing or invalid.');
+        }
+
+        return [$match[1], $match[2]];
+    }
+
+    private static function now(): DateTimeImmutable
+    {
+        return new DateTimeImmutable('now', new DateTimeZone('UTC'));
+    }
+
+    private static function format(DateTimeImmutable $time): string
+    {
+        return $time->format('Y-m-d H:i:s');
     }
 }

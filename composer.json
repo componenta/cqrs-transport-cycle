@@ -5,8 +5,8 @@
     "license": "MIT",
     "require": {
         "php": ">=8.4",
-        "componenta/cqrs-transport": "^1.0",
-        "cycle/database": "^2.15"
+        "componenta/cqrs-transport": "^1.0 || ^2.0",
+        "cycle/database": "^2.21"
     },
     "require-dev": {
         "pestphp/pest": "^4.0",
@@ -23,7 +23,10 @@
         }
     },
     "config": {
-        "sort-packages": true
+        "sort-packages": true,
+        "allow-plugins": {
+            "pestphp/pest-plugin": true
+        }
     },
     "minimum-stability": "stable"
 }
