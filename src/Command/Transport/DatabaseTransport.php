@@ -8,7 +8,6 @@ use Cycle\Database\DatabaseInterface;
 use Cycle\Database\Query\OnConflict;
 use Cycle\Database\Query\SelectQuery;
 use DateTimeImmutable;
-use DateTimeZone;
 use InvalidArgumentException;
 use Throwable;
 
@@ -81,7 +80,7 @@ final readonly class DatabaseTransport implements TransportInterface
             throw new InvalidArgumentException('Transport delay must be non-negative.');
         }
 
-        $now = self::now();
+        $now = $this->databaseNow();
         $availableAt = $delay > 0
             ? $now->modify("+{$delay} seconds")
             : $now;
@@ -144,7 +143,7 @@ final readonly class DatabaseTransport implements TransportInterface
     /** @return Envelope|false|null False means that another consumer won the claim race. */
     private function getAttempt(): Envelope|false|null
     {
-        $now = self::now();
+        $now = $this->databaseNow();
         $redeliverLimit = self::format($now->modify("-{$this->redeliverTimeout} seconds"));
         $nowFormatted = self::format($now);
 
@@ -222,7 +221,7 @@ final readonly class DatabaseTransport implements TransportInterface
             ->where('completed_at', null)
             ->where('failed_at', null)
             ->values([
-                'completed_at' => self::format(self::now()),
+                'completed_at' => self::format($this->databaseNow()),
                 'lease_token' => null,
             ])
             ->run();
@@ -235,7 +234,7 @@ final readonly class DatabaseTransport implements TransportInterface
     public function reject(Envelope $envelope): void
     {
         [$id, $leaseToken] = self::parseReceiptHandle($envelope->receiptHandle);
-        $failedAt = self::format(self::now());
+        $failedAt = self::format($this->databaseNow());
 
         if (!$this->database->begin()) {
             throw new TransportException('Failed to begin the transport rejection transaction.');
@@ -411,9 +410,32 @@ final readonly class DatabaseTransport implements TransportInterface
         return [$match[1], $match[2]];
     }
 
-    private static function now(): DateTimeImmutable
+    private function databaseNow(): DateTimeImmutable
     {
-        return new DateTimeImmutable('now', new DateTimeZone('UTC'));
+        $driver = $this->database->getDriver(DatabaseInterface::WRITE);
+        $statement = $driver->query('SELECT CURRENT_TIMESTAMP');
+
+        try {
+            $value = $statement->fetchColumn();
+        } finally {
+            $statement->close();
+        }
+
+        if (!is_string($value) || trim($value) === '') {
+            throw new TransportException(sprintf(
+                'Database CURRENT_TIMESTAMP must return a non-empty string; %s given.',
+                get_debug_type($value),
+            ));
+        }
+
+        try {
+            return new DateTimeImmutable($value, $driver->getTimezone());
+        } catch (Throwable $exception) {
+            throw new TransportException(sprintf(
+                'Database CURRENT_TIMESTAMP returned an invalid timestamp "%s".',
+                $value,
+            ), previous: $exception);
+        }
     }
 
     private static function format(DateTimeImmutable $time): string
