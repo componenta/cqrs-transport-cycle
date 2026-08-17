@@ -5,7 +5,7 @@
     "license": "MIT",
     "require": {
         "php": ">=8.4",
-        "componenta/cqrs-transport": "^1.0 || ^2.0 || ^3.0.1",
+        "componenta/cqrs-transport": "^1.0 || ^2.0 || ^3.0.1 || ^4.0",
         "cycle/database": "^2.21"
     },
     "require-dev": {
@@ -28,5 +28,9 @@
             "pestphp/pest-plugin": true
         }
     },
-    "minimum-stability": "stable"
+    "minimum-stability": "stable",
+    "scripts": {
+        "test": "@php vendor/bin/pest",
+        "analyse": "@php vendor/bin/phpstan analyse src --level=max"
+    }
 }
