@@ -17,6 +17,9 @@ use Throwable;
  * Uses an opaque `<row-id>:<lease-token>` receipt handle for claimed messages.
  * Completed and failed rows are retained as idempotency tombstones.
  *
+ * All queue reads are executed through the write driver. Queue consistency
+ * relies on read-your-write semantics and must not depend on replica lag.
+ *
  * Schema:
  * ```sql
  * CREATE TABLE command_transport (
@@ -100,7 +103,7 @@ final readonly class DatabaseTransport implements TransportInterface
             OnConflict::target(['queue', 'operation_id'])->doNothing(),
         )->run();
 
-        $row = $this->database->select(['id', 'command_class', 'payload'])
+        $row = $this->writeSelect(['id', 'command_class', 'payload'])
             ->from(self::TABLE)
             ->where('queue', $this->name)
             ->where('operation_id', $envelope->operationId)
@@ -147,7 +150,7 @@ final readonly class DatabaseTransport implements TransportInterface
         $redeliverLimit = self::format($now->modify("-{$this->redeliverTimeout} seconds"));
         $nowFormatted = self::format($now);
 
-        $row = $this->database->select([
+        $row = $this->writeSelect([
             'id',
             'operation_id',
             'command_class',
@@ -329,7 +332,7 @@ final readonly class DatabaseTransport implements TransportInterface
 
     private function hasDisposition(string $id, Envelope $envelope, string $column): bool
     {
-        $row = $this->database->select([$column])
+        $row = $this->writeSelect([$column])
             ->from(self::TABLE)
             ->where('id', $id)
             ->where('queue', $this->name)
@@ -341,6 +344,15 @@ final readonly class DatabaseTransport implements TransportInterface
             ->fetch();
 
         return is_array($row) && is_string($row[$column] ?? null);
+    }
+
+    /** @param list<string> $columns */
+    private function writeSelect(array $columns): SelectQuery
+    {
+        return $this->database
+            ->getDriver(DatabaseInterface::WRITE)
+            ->getQueryBuilder()
+            ->selectQuery($this->database->getPrefix(), [], $columns);
     }
 
     /**
@@ -362,9 +374,7 @@ final readonly class DatabaseTransport implements TransportInterface
         throw new TransportException('Transport row contains an invalid ID.');
     }
 
-    /**
-     * @param array<array-key, mixed> $row
-     */
+    /** @param array<array-key, mixed> $row */
     private static function rowString(array $row, string $column): string
     {
         $value = $row[$column] ?? null;
@@ -379,9 +389,7 @@ final readonly class DatabaseTransport implements TransportInterface
         return $value;
     }
 
-    /**
-     * @param array<array-key, mixed> $row
-     */
+    /** @param array<array-key, mixed> $row */
     private static function rowNullableString(array $row, string $column): ?string
     {
         $value = $row[$column] ?? null;
@@ -396,9 +404,7 @@ final readonly class DatabaseTransport implements TransportInterface
         return $value;
     }
 
-    /**
-     * @return array{non-empty-string, non-empty-string}
-     */
+    /** @return array{non-empty-string, non-empty-string} */
     private static function parseReceiptHandle(string|int|null $receiptHandle): array
     {
         if (!is_string($receiptHandle)
