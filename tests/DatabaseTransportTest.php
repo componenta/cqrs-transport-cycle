@@ -7,22 +7,28 @@ use Componenta\CQRS\Command\Transport\Envelope;
 use Componenta\CQRS\Command\Transport\TransportException;
 use Cycle\Database\Config\DatabaseConfig;
 use Cycle\Database\Config\SQLiteDriverConfig;
+use Cycle\Database\Database;
 use Cycle\Database\DatabaseInterface;
 use Cycle\Database\DatabaseManager;
+use Cycle\Database\Driver\SQLite\SQLiteDriver;
+use Cycle\Database\StatementInterface;
 
-function transportDatabase(): DatabaseInterface
+final class TransportFixedClockSQLiteDriver extends SQLiteDriver
 {
-    $manager = new DatabaseManager(new DatabaseConfig([
-        'default' => 'default',
-        'databases' => [
-            'default' => ['connection' => 'sqlite'],
-        ],
-        'connections' => [
-            'sqlite' => new SQLiteDriverConfig(),
-        ],
-    ]));
-    $database = $manager->database();
+    public static string $now = '2040-01-02 03:04:05';
 
+    public function query(string $statement, array $parameters = []): StatementInterface
+    {
+        if (trim($statement) === 'SELECT CURRENT_TIMESTAMP') {
+            return parent::query('SELECT ?', [self::$now]);
+        }
+
+        return parent::query($statement, $parameters);
+    }
+}
+
+function createTransportSchema(DatabaseInterface $database): void
+{
     $database->execute(<<<'SQL'
 CREATE TABLE command_transport (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -54,6 +60,26 @@ CREATE TABLE command_transport_failed (
     UNIQUE (queue, operation_id)
 )
 SQL);
+}
+
+function transportDatabase(?SQLiteDriver $driver = null): DatabaseInterface
+{
+    if ($driver === null) {
+        $manager = new DatabaseManager(new DatabaseConfig([
+            'default' => 'default',
+            'databases' => [
+                'default' => ['connection' => 'sqlite'],
+            ],
+            'connections' => [
+                'sqlite' => new SQLiteDriverConfig(),
+            ],
+        ]));
+        $database = $manager->database();
+    } else {
+        $database = new Database('default', '', $driver);
+    }
+
+    createTransportSchema($database);
 
     return $database;
 }
@@ -97,6 +123,57 @@ it('deduplicates sends and retains a completed operation tombstone', function ()
         ->and($database->select()->from('command_transport')->count())->toBe(1)
         ->and($database->select('completed_at')->from('command_transport')->run()->fetchColumn())
         ->not->toBeNull();
+});
+
+it('uses the write database clock for delay, claim, completion, and failure timestamps', function (): void {
+    TransportFixedClockSQLiteDriver::$now = '2040-01-02 03:04:05';
+    $driver = TransportFixedClockSQLiteDriver::create(new SQLiteDriverConfig());
+    $database = transportDatabase($driver);
+    $transport = new DatabaseTransport($database, 'commands');
+
+    $transport->send(databaseEnvelope('completed-operation'), delay: 60);
+    $stored = $database->select(['created_at', 'available_at'])
+        ->from('command_transport')
+        ->where('operation_id', 'completed-operation')
+        ->run()
+        ->fetch();
+
+    expect($stored)->toMatchArray([
+        'created_at' => '2040-01-02 03:04:05',
+        'available_at' => '2040-01-02 03:05:05',
+    ])->and($transport->get())->toBeNull();
+
+    TransportFixedClockSQLiteDriver::$now = '2040-01-02 03:05:05';
+    $claimed = requireDatabaseEnvelope($transport->get());
+    expect($database->select('delivered_at')
+        ->from('command_transport')
+        ->where('operation_id', 'completed-operation')
+        ->run()
+        ->fetchColumn())->toBe('2040-01-02 03:05:05');
+
+    TransportFixedClockSQLiteDriver::$now = '2040-01-02 03:06:05';
+    $transport->ack($claimed);
+    expect($database->select('completed_at')
+        ->from('command_transport')
+        ->where('operation_id', 'completed-operation')
+        ->run()
+        ->fetchColumn())->toBe('2040-01-02 03:06:05');
+
+    $transport->send(databaseEnvelope('failed-operation'));
+    $failed = requireDatabaseEnvelope($transport->get());
+    TransportFixedClockSQLiteDriver::$now = '2040-01-02 03:07:05';
+    $transport->reject($failed);
+
+    expect($database->select('failed_at')
+        ->from('command_transport')
+        ->where('operation_id', 'failed-operation')
+        ->run()
+        ->fetchColumn())->toBe('2040-01-02 03:07:05')
+        ->and($database->select('failed_at')
+            ->from('command_transport_failed')
+            ->where('operation_id', 'failed-operation')
+            ->run()
+            ->fetchColumn())->toBe('2040-01-02 03:07:05');
 });
 
 it('rejects reuse of an operation ID for a different payload', function (): void {
