@@ -20,6 +20,9 @@ use Throwable;
  * All queue reads are executed through the write driver. Queue consistency
  * relies on read-your-write semantics and must not depend on replica lag.
  *
+ * The reference schema below is MySQL-oriented. Adapt types/index syntax for
+ * other databases while preserving the uniqueness and lookup invariants.
+ *
  * Schema:
  * ```sql
  * CREATE TABLE command_transport (
@@ -27,7 +30,7 @@ use Throwable;
  *     queue VARCHAR(64) NOT NULL,
  *     operation_id VARCHAR(36) NOT NULL,
  *     command_class VARCHAR(255) NOT NULL,
- *     payload TEXT NOT NULL,
+ *     payload LONGTEXT NOT NULL,
  *     available_at TIMESTAMP NOT NULL,
  *     delivered_at TIMESTAMP NULL,
  *     lease_token VARCHAR(32) NULL,
@@ -43,7 +46,7 @@ use Throwable;
  *     queue VARCHAR(64) NOT NULL,
  *     operation_id VARCHAR(36) NOT NULL,
  *     command_class VARCHAR(255) NOT NULL,
- *     payload TEXT NOT NULL,
+ *     payload LONGTEXT NOT NULL,
  *     failed_at TIMESTAMP NOT NULL,
  *     UNIQUE KEY uq_command_transport_failed_operation (queue, operation_id),
  *     INDEX idx_failed_queue (queue, failed_at)
