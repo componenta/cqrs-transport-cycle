@@ -6,7 +6,7 @@ Cycle Database transport implementation for `componenta/cqrs-transport`.
 composer require componenta/cqrs-transport-cycle
 ```
 
-The adapter supports transport v1/v2/v3 and the current transport v4 API. Its boundary is `TransportInterface` plus `Envelope`; serializer and worker internals are not part of the database adapter.
+The adapter supports transport v1/v2/v3 and the current transport v4 API. Its boundary is `TransportInterface` plus `Envelope`; serializer and worker internals are not part of the database adapter. The minimum supported Cycle Database version is 2.21.0.
 
 The package provides `Componenta\CQRS\Command\Transport\DatabaseTransport`.
 
