@@ -31,6 +31,7 @@ use Throwable;
  *     operation_id VARCHAR(36) NOT NULL,
  *     command_class VARCHAR(255) NOT NULL,
  *     payload LONGTEXT NOT NULL,
+ *     context_payload LONGTEXT NOT NULL,
  *     available_at TIMESTAMP NOT NULL,
  *     delivered_at TIMESTAMP NULL,
  *     lease_token VARCHAR(32) NULL,
@@ -47,6 +48,7 @@ use Throwable;
  *     operation_id VARCHAR(36) NOT NULL,
  *     command_class VARCHAR(255) NOT NULL,
  *     payload LONGTEXT NOT NULL,
+ *     context_payload LONGTEXT NOT NULL,
  *     failed_at TIMESTAMP NOT NULL,
  *     UNIQUE KEY uq_command_transport_failed_operation (queue, operation_id),
  *     INDEX idx_failed_queue (queue, failed_at)
@@ -96,6 +98,7 @@ final readonly class DatabaseTransport implements TransportInterface
             'operation_id' => $envelope->operationId,
             'command_class' => $envelope->commandClass,
             'payload' => $envelope->payload,
+            'context_payload' => $envelope->contextPayload,
             'available_at' => self::format($availableAt),
             'delivered_at' => null,
             'lease_token' => null,
@@ -106,7 +109,7 @@ final readonly class DatabaseTransport implements TransportInterface
             OnConflict::target(['queue', 'operation_id'])->doNothing(),
         )->run();
 
-        $row = $this->writeSelect(['id', 'command_class', 'payload'])
+        $row = $this->writeSelect(['id', 'command_class', 'payload', 'context_payload'])
             ->from(self::TABLE)
             ->where('queue', $this->name)
             ->where('operation_id', $envelope->operationId)
@@ -121,10 +124,14 @@ final readonly class DatabaseTransport implements TransportInterface
         $id = self::rowId($row);
         $commandClass = self::rowString($row, 'command_class');
         $payload = self::rowString($row, 'payload');
+        $contextPayload = self::rowString($row, 'context_payload');
 
-        if ($commandClass !== $envelope->commandClass || $payload !== $envelope->payload) {
+        if ($commandClass !== $envelope->commandClass
+            || $payload !== $envelope->payload
+            || $contextPayload !== $envelope->contextPayload
+        ) {
             throw new TransportException(sprintf(
-                'Operation ID "%s" is already used by a different command payload in queue "%s".',
+                'Operation ID "%s" is already used by a different command payload or context in queue "%s".',
                 $envelope->operationId,
                 $this->name,
             ));
@@ -158,6 +165,7 @@ final readonly class DatabaseTransport implements TransportInterface
             'operation_id',
             'command_class',
             'payload',
+            'context_payload',
             'delivered_at',
             'lease_token',
         ])
@@ -183,6 +191,7 @@ final readonly class DatabaseTransport implements TransportInterface
         $operationId = self::rowString($row, 'operation_id');
         $commandClass = self::rowString($row, 'command_class');
         $payload = self::rowString($row, 'payload');
+        $contextPayload = self::rowString($row, 'context_payload');
         $oldDeliveredAt = self::rowNullableString($row, 'delivered_at');
         $oldLeaseToken = self::rowNullableString($row, 'lease_token');
 
@@ -210,6 +219,7 @@ final readonly class DatabaseTransport implements TransportInterface
             commandClass: $commandClass,
             payload: $payload,
             receiptHandle: "{$id}:{$leaseToken}",
+            contextPayload: $contextPayload,
         );
     }
 
@@ -223,6 +233,7 @@ final readonly class DatabaseTransport implements TransportInterface
             ->where('operation_id', $envelope->operationId)
             ->where('command_class', $envelope->commandClass)
             ->where('payload', $envelope->payload)
+            ->where('context_payload', $envelope->contextPayload)
             ->where('lease_token', $leaseToken)
             ->where('completed_at', null)
             ->where('failed_at', null)
@@ -253,6 +264,7 @@ final readonly class DatabaseTransport implements TransportInterface
                 ->where('operation_id', $envelope->operationId)
                 ->where('command_class', $envelope->commandClass)
                 ->where('payload', $envelope->payload)
+                ->where('context_payload', $envelope->contextPayload)
                 ->where('lease_token', $leaseToken)
                 ->where('completed_at', null)
                 ->where('failed_at', null)
@@ -281,6 +293,7 @@ final readonly class DatabaseTransport implements TransportInterface
                 'operation_id' => $envelope->operationId,
                 'command_class' => $envelope->commandClass,
                 'payload' => $envelope->payload,
+                'context_payload' => $envelope->contextPayload,
                 'failed_at' => $failedAt,
             ])->onConflict(
                 OnConflict::target(['queue', 'operation_id'])->doNothing(),
@@ -342,6 +355,7 @@ final readonly class DatabaseTransport implements TransportInterface
             ->where('operation_id', $envelope->operationId)
             ->where('command_class', $envelope->commandClass)
             ->where('payload', $envelope->payload)
+            ->where('context_payload', $envelope->contextPayload)
             ->limit(1)
             ->run()
             ->fetch();
