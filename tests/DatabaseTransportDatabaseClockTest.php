@@ -37,6 +37,7 @@ CREATE TABLE command_transport (
     operation_id VARCHAR(36) NOT NULL,
     command_class VARCHAR(255) NOT NULL,
     payload TEXT NOT NULL,
+    context_payload TEXT NOT NULL,
     available_at TIMESTAMP NOT NULL,
     delivered_at TIMESTAMP NULL,
     lease_token VARCHAR(32) NULL,
@@ -57,6 +58,7 @@ CREATE TABLE command_transport_failed (
     operation_id VARCHAR(36) NOT NULL,
     command_class VARCHAR(255) NOT NULL,
     payload TEXT NOT NULL,
+    context_payload TEXT NOT NULL,
     failed_at TIMESTAMP NOT NULL,
     UNIQUE (queue, operation_id)
 )
