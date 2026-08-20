@@ -1,23 +1,50 @@
 # Componenta CQRS Transport Cycle
 
-Cycle Database transport implementation for `componenta/cqrs-transport`.
+Cycle Database transport implementation for `componenta/cqrs-transport` v5.
 
 ```bash
 composer require componenta/cqrs-transport-cycle
 ```
 
-The adapter supports transport v1/v2/v3 and the current transport v4 API. Its boundary is `TransportInterface` plus `Envelope`; serializer and worker internals are not part of the database adapter. The minimum supported Cycle Database version is 2.21.0.
+The package provides `Componenta\CQRS\Command\Transport\DatabaseTransport`. The application is responsible for creating the transport tables described on that class and registering the instance in `TransportRegistryInterface`.
 
-The package provides `Componenta\CQRS\Command\Transport\DatabaseTransport`.
+## Envelope persistence
 
-The application is responsible for creating the transport tables described on that class and registering the instance in `TransportRegistryInterface`.
+The database adapter persists the complete transport envelope boundary:
 
-The live table must enforce a unique `(queue, operation_id)` key. Completed and failed rows are retained as tombstones, so retrying an uncertain `send()` does not create another queue entry. Reusing an operation ID with a different command class or payload is rejected. If tombstones are cleaned up, the application must choose a retention period longer than its maximum producer retry window.
+- `operation_id`;
+- `command_class`;
+- serialized command `payload`;
+- serialized operation `context_payload`.
 
-Each delivery has an opaque lease-token receipt. `ack()` and `reject()` only change the row while that token still owns the lease; a worker whose lease was reclaimed cannot dispose another worker's delivery.
+The operation context is produced by `OperationContextSerializerInterface` in `componenta/cqrs-transport`. The database adapter treats it as opaque data and binds it to the same operation ID as the command payload.
+
+The live table must enforce a unique `(queue, operation_id)` key. Completed and failed rows are retained as tombstones, so repeating an uncertain `send()` does not create another queue entry. Reusing an operation ID with a different command class, command payload, or operation context is rejected. If tombstones are cleaned up, choose a retention period longer than the maximum producer retry window.
+
+## v5 schema migration
+
+Existing installations must add `context_payload` to both transport tables before deploying the v5 adapter:
+
+```sql
+ALTER TABLE command_transport
+    ADD COLUMN context_payload LONGTEXT NOT NULL;
+
+ALTER TABLE command_transport_failed
+    ADD COLUMN context_payload LONGTEXT NOT NULL;
+```
+
+For a zero-context deployment, existing rows can use the serialized empty object `{}` during migration. On databases that require an explicit staged migration, add the column with a temporary default, backfill existing rows to `{}`, then remove the default if desired.
+
+The full reference schema is documented on `DatabaseTransport`.
+
+## Delivery and consistency
+
+Each delivery has an opaque lease-token receipt. `ack()` and `reject()` only change the row while that token still owns the lease; a worker whose lease was reclaimed cannot dispose another worker's delivery. The receipt is additionally bound to operation ID, command class, command payload, and operation context.
 
 All queue consistency reads use the Cycle **write driver**, including post-send read-back, claim candidate selection, and idempotent disposition checks. They intentionally do not use `Database::select()`, because Cycle routes that API through the optional read driver and a lagging replica cannot provide the read-your-write/lease consistency required by a queue.
 
-All queue timestamps and redelivery cutoffs are also derived from `CURRENT_TIMESTAMP` on the write driver. Producer and worker host clocks therefore do not participate in delayed availability, lease age, completion, or failure decisions. The write database/session timezone should remain stable; Cycle drivers use UTC by default.
+All queue timestamps and redelivery cutoffs are derived from `CURRENT_TIMESTAMP` on the write driver. Producer and worker host clocks therefore do not participate in delayed availability, lease age, completion, or failure decisions. The write database/session timezone should remain stable; Cycle drivers use UTC by default.
 
-`redeliverTimeout` is the maximum expected uninterrupted processing duration, not a heartbeat interval. The transport cannot renew a lease while a synchronous PHP handler is running. Configure it above the longest handler duration; after the timeout another worker may execute the same command concurrently. Handlers must therefore remain idempotent. A caught worker failure is rejected into the failed table and is not visibility-redelivered; use retry middleware or an explicit failed-message retry workflow when retries are required.
+`redeliverTimeout` is the maximum expected uninterrupted processing duration, not a heartbeat interval. The transport cannot renew a lease while a synchronous PHP handler is running. Configure it above the longest handler duration; after the timeout another worker may execute the same command concurrently. Handlers must therefore remain idempotent.
+
+A caught worker failure is rejected into the failed table and is not visibility-redelivered. Use retry middleware around command execution or an explicit failed-message retry workflow when execution retries are required.
