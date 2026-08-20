@@ -14,10 +14,8 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      max-parallel: 1
       matrix:
         php: ['8.4', '8.5']
-        transport: ['1.0.0', '2.0.0', '3.0.0', '4.0.0']
     steps:
       - uses: actions/checkout@v7
       - name: Checkout current transport source
@@ -34,14 +32,12 @@ jobs:
       - name: Configure Composer authentication
         run: composer config --global github-oauth.github.com "${{ github.token }}"
       - run: composer validate --strict
-      - name: Select transport version
+      - name: Select current transport source
         shell: bash
         run: |
-          if [ "${{ matrix.transport }}" = "4.0.0" ]; then
-            composer config --json repositories.componenta-cqrs-transport '{"type":"path","url":".ci/cqrs-transport","options":{"versions":{"componenta/cqrs-transport":"4.0.0"}}}'
-          fi
-          composer require --no-update "componenta/cqrs-transport:${{ matrix.transport }}"
-      - name: Install dependency matrix
+          composer config --json repositories.componenta-cqrs-transport '{"type":"path","url":".ci/cqrs-transport","options":{"versions":{"componenta/cqrs-transport":"5.0.0"}}}'
+          composer require --no-update componenta/cqrs-transport:5.0.0
+      - name: Install dependencies
         shell: bash
         env:
           COMPOSER_MAX_PARALLEL_HTTP: 2
@@ -86,8 +82,8 @@ jobs:
       - name: Select current transport and minimum database version
         shell: bash
         run: |
-          composer config --json repositories.componenta-cqrs-transport '{"type":"path","url":".ci/cqrs-transport","options":{"versions":{"componenta/cqrs-transport":"4.0.0"}}}'
-          composer require --no-update componenta/cqrs-transport:4.0.0 cycle/database:2.21.0
+          composer config --json repositories.componenta-cqrs-transport '{"type":"path","url":".ci/cqrs-transport","options":{"versions":{"componenta/cqrs-transport":"5.0.0"}}}'
+          composer require --no-update componenta/cqrs-transport:5.0.0 cycle/database:2.21.0
       - name: Install dependencies
         run: composer update --with-all-dependencies --no-interaction --prefer-dist --no-progress
       - run: composer test
