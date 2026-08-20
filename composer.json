@@ -29,6 +29,11 @@
         }
     },
     "minimum-stability": "stable",
+    "extra": {
+        "branch-alias": {
+            "dev-main": "2.0.x-dev"
+        }
+    },
     "scripts": {
         "test": "@php vendor/bin/pest",
         "analyse": "@php vendor/bin/phpstan analyse src --level=max"
