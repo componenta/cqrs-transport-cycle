@@ -36,6 +36,7 @@ CREATE TABLE command_transport (
     operation_id VARCHAR(36) NOT NULL,
     command_class VARCHAR(255) NOT NULL,
     payload TEXT NOT NULL,
+    context_payload TEXT NOT NULL,
     available_at TIMESTAMP NOT NULL,
     delivered_at TIMESTAMP NULL,
     lease_token VARCHAR(32) NULL,
@@ -56,6 +57,7 @@ CREATE TABLE command_transport_failed (
     operation_id VARCHAR(36) NOT NULL,
     command_class VARCHAR(255) NOT NULL,
     payload TEXT NOT NULL,
+    context_payload TEXT NOT NULL,
     failed_at TIMESTAMP NOT NULL,
     UNIQUE (queue, operation_id)
 )
@@ -84,12 +86,16 @@ function transportDatabase(?SQLiteDriver $driver = null): DatabaseInterface
     return $database;
 }
 
-function databaseEnvelope(string $operationId = 'operation-id', string $payload = '{}'): Envelope
-{
+function databaseEnvelope(
+    string $operationId = 'operation-id',
+    string $payload = '{}',
+    string $contextPayload = '{}',
+): Envelope {
     return new Envelope(
         operationId: $operationId,
         commandClass: stdClass::class,
         payload: $payload,
+        contextPayload: $contextPayload,
     );
 }
 
@@ -105,7 +111,7 @@ function requireDatabaseEnvelope(?Envelope $envelope): Envelope
 it('deduplicates sends and retains a completed operation tombstone', function (): void {
     $database = transportDatabase();
     $transport = new DatabaseTransport($database, 'commands');
-    $envelope = databaseEnvelope();
+    $envelope = databaseEnvelope(contextPayload: '{"tenant":"main"}');
 
     $first = $transport->send($envelope);
     $second = $transport->send($envelope);
@@ -114,6 +120,8 @@ it('deduplicates sends and retains a completed operation tombstone', function ()
         ->and($database->select()->from('command_transport')->count())->toBe(1);
 
     $claimed = requireDatabaseEnvelope($transport->get());
+    expect($claimed->contextPayload)->toBe('{"tenant":"main"}');
+
     $transport->ack($claimed);
     $transport->ack($claimed);
     $resent = $transport->send($envelope);
@@ -176,12 +184,16 @@ it('uses the write database clock for delay, claim, completion, and failure time
             ->fetchColumn())->toBe('2040-01-02 03:07:05');
 });
 
-it('rejects reuse of an operation ID for a different payload', function (): void {
+it('rejects reuse of an operation ID for a different payload or context', function (): void {
     $transport = new DatabaseTransport(transportDatabase(), 'commands');
-    $transport->send(databaseEnvelope(payload: '{"value":1}'));
+    $transport->send(databaseEnvelope(payload: '{"value":1}', contextPayload: '{"tenant":"a"}'));
 
-    expect(fn() => $transport->send(databaseEnvelope(payload: '{"value":2}')))
-        ->toThrow(TransportException::class, 'already used by a different command payload');
+    expect(fn() => $transport->send(
+        databaseEnvelope(payload: '{"value":2}', contextPayload: '{"tenant":"a"}'),
+    ))->toThrow(TransportException::class, 'different command payload or context')
+        ->and(fn() => $transport->send(
+            databaseEnvelope(payload: '{"value":1}', contextPayload: '{"tenant":"b"}'),
+        ))->toThrow(TransportException::class, 'different command payload or context');
 });
 
 it('retries a bounded claim after losing a compare-and-swap race', function (): void {
@@ -228,22 +240,37 @@ it('prevents a stale worker from disposing a message claimed by another worker',
     expect($transport->get())->toBeNull();
 });
 
-it('binds a receipt handle to the claimed command payload', function (): void {
+it('binds a receipt handle to the claimed command payload and context', function (): void {
     $database = transportDatabase();
     $transport = new DatabaseTransport($database, 'commands');
-    $transport->send(databaseEnvelope(payload: '{"value":1}'));
+    $transport->send(databaseEnvelope(
+        payload: '{"value":1}',
+        contextPayload: '{"tenant":"a"}',
+    ));
 
     $claimed = requireDatabaseEnvelope($transport->get());
-    $forged = new Envelope(
+    $forgedPayload = new Envelope(
         operationId: $claimed->operationId,
         commandClass: $claimed->commandClass,
         payload: '{"value":2}',
         receiptHandle: $claimed->receiptHandle,
+        contextPayload: $claimed->contextPayload,
+    );
+    $forgedContext = new Envelope(
+        operationId: $claimed->operationId,
+        commandClass: $claimed->commandClass,
+        payload: $claimed->payload,
+        receiptHandle: $claimed->receiptHandle,
+        contextPayload: '{"tenant":"b"}',
     );
 
-    expect(fn() => $transport->ack($forged))
+    expect(fn() => $transport->ack($forgedPayload))
         ->toThrow(TransportException::class, 'stale or invalid')
-        ->and(fn() => $transport->reject($forged))
+        ->and(fn() => $transport->reject($forgedPayload))
+        ->toThrow(TransportException::class, 'stale or invalid')
+        ->and(fn() => $transport->ack($forgedContext))
+        ->toThrow(TransportException::class, 'stale or invalid')
+        ->and(fn() => $transport->reject($forgedContext))
         ->toThrow(TransportException::class, 'stale or invalid');
 
     $transport->ack($claimed);
@@ -251,10 +278,10 @@ it('binds a receipt handle to the claimed command payload', function (): void {
     expect($transport->get())->toBeNull();
 });
 
-it('moves a caught failure once and keeps a failed operation tombstone', function (): void {
+it('moves a caught failure once and keeps a failed operation tombstone with context', function (): void {
     $database = transportDatabase();
     $transport = new DatabaseTransport($database, 'commands');
-    $envelope = databaseEnvelope();
+    $envelope = databaseEnvelope(contextPayload: '{"tenant":"main"}');
 
     $transport->send($envelope);
     $claimed = requireDatabaseEnvelope($transport->get());
@@ -264,6 +291,8 @@ it('moves a caught failure once and keeps a failed operation tombstone', functio
 
     expect($transport->get())->toBeNull()
         ->and($database->select()->from('command_transport_failed')->count())->toBe(1)
+        ->and($database->select('context_payload')->from('command_transport_failed')->run()->fetchColumn())
+        ->toBe('{"tenant":"main"}')
         ->and($database->select('failed_at')->from('command_transport')->run()->fetchColumn())
         ->not->toBeNull();
 });
