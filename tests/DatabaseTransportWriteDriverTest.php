@@ -22,6 +22,7 @@ CREATE TABLE command_transport (
     operation_id VARCHAR(36) NOT NULL,
     command_class VARCHAR(255) NOT NULL,
     payload TEXT NOT NULL,
+    context_payload TEXT NOT NULL,
     available_at TIMESTAMP NOT NULL,
     delivered_at TIMESTAMP NULL,
     lease_token VARCHAR(32) NULL,
@@ -42,6 +43,7 @@ CREATE TABLE command_transport_failed (
     operation_id VARCHAR(36) NOT NULL,
     command_class VARCHAR(255) NOT NULL,
     payload TEXT NOT NULL,
+    context_payload TEXT NOT NULL,
     failed_at TIMESTAMP NOT NULL,
     UNIQUE (queue, operation_id)
 )
@@ -59,13 +61,15 @@ it('uses the write driver for all queue consistency reads', function (): void {
         operationId: 'write-driver-read-your-write',
         commandClass: stdClass::class,
         payload: '{}',
+        contextPayload: '{"tenant":"main"}',
     );
 
     $sent = $transport->send($source);
     expect($sent->receiptHandle)->toBeString();
 
     $claimed = $transport->get();
-    expect($claimed)->toBeInstanceOf(Envelope::class);
+    expect($claimed)->toBeInstanceOf(Envelope::class)
+        ->and($claimed?->contextPayload)->toBe('{"tenant":"main"}');
 
     if (!$claimed instanceof Envelope) {
         throw new RuntimeException('Expected a claimed envelope.');
