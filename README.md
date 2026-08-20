@@ -21,19 +21,35 @@ The operation context is produced by `OperationContextSerializerInterface` in `c
 
 The live table must enforce a unique `(queue, operation_id)` key. Completed and failed rows are retained as tombstones, so repeating an uncertain `send()` does not create another queue entry. Reusing an operation ID with a different command class, command payload, or operation context is rejected. If tombstones are cleaned up, choose a retention period longer than the maximum producer retry window.
 
-## v5 schema migration
+## Schema migration
 
-Existing installations must add `context_payload` to both transport tables before deploying the v5 adapter:
+Existing non-empty transport tables must be migrated **before** deploying this adapter. Do not add a `NOT NULL` column in one step unless the database explicitly supplies a safe value for existing rows.
+
+For the MySQL-oriented reference schema, use a staged migration:
 
 ```sql
 ALTER TABLE command_transport
-    ADD COLUMN context_payload LONGTEXT NOT NULL;
+    ADD COLUMN context_payload LONGTEXT NULL;
 
 ALTER TABLE command_transport_failed
-    ADD COLUMN context_payload LONGTEXT NOT NULL;
+    ADD COLUMN context_payload LONGTEXT NULL;
+
+UPDATE command_transport
+SET context_payload = '{}'
+WHERE context_payload IS NULL;
+
+UPDATE command_transport_failed
+SET context_payload = '{}'
+WHERE context_payload IS NULL;
+
+ALTER TABLE command_transport
+    MODIFY context_payload LONGTEXT NOT NULL;
+
+ALTER TABLE command_transport_failed
+    MODIFY context_payload LONGTEXT NOT NULL;
 ```
 
-For a zero-context deployment, existing rows can use the serialized empty object `{}` during migration. On databases that require an explicit staged migration, add the column with a temporary default, backfill existing rows to `{}`, then remove the default if desired.
+`{}` is the serialized empty operation context and is the correct backfill for messages created before operation-context propagation. Adapt the DDL syntax for other databases while preserving the non-null invariant after backfill.
 
 The full reference schema is documented on `DatabaseTransport`.
 
