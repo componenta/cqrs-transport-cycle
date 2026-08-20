@@ -102,9 +102,61 @@ jobs:
       - run: composer test
       - run: composer analyse
 
+  verify-mysql:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: cqrs_transport
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -proot"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    env:
+      CQRS_TRANSPORT_TEST_MYSQL_DSN: mysql:host=127.0.0.1;port=3306;dbname=cqrs_transport
+      CQRS_TRANSPORT_TEST_MYSQL_USER: root
+      CQRS_TRANSPORT_TEST_MYSQL_PASSWORD: root
+    steps:
+      - uses: actions/checkout@v7
+      - name: Checkout current CQRS v4 source
+        uses: actions/checkout@v7
+        with:
+          repository: componenta/cqrs
+          ref: main
+          path: .ci/cqrs
+      - name: Checkout current transport v5 source
+        uses: actions/checkout@v7
+        with:
+          repository: componenta/cqrs-transport
+          ref: main
+          path: .ci/cqrs-transport
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          coverage: none
+          extensions: pdo_mysql
+          tools: composer:v2
+      - name: Configure Composer authentication
+        run: composer config --global github-oauth.github.com "${{ github.token }}"
+      - run: composer validate --strict
+      - name: Select current CQRS and transport sources
+        shell: bash
+        run: |
+          composer config --json repositories.componenta-cqrs '{"type":"path","url":".ci/cqrs","options":{"versions":{"componenta/cqrs":"4.0.0"}}}'
+          composer config --json repositories.componenta-cqrs-transport '{"type":"path","url":".ci/cqrs-transport","options":{"versions":{"componenta/cqrs-transport":"5.0.0"}}}'
+      - name: Install dependencies
+        run: composer update --with-all-dependencies --no-interaction --prefer-dist --no-progress
+      - name: Verify MySQL reference schema and byte-exact receipts
+        run: vendor/bin/pest tests/DatabaseTransportMySqlTest.php
+
   publish:
     if: github.event_name == 'push' && startsWith(github.event.head_commit.message, 'Release v')
-    needs: [verify, verify-minimum-database]
+    needs: [verify, verify-minimum-database, verify-mysql]
     runs-on: ubuntu-latest
     permissions:
       contents: write
