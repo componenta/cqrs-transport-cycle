@@ -18,7 +18,13 @@ jobs:
         php: ['8.4', '8.5']
     steps:
       - uses: actions/checkout@v7
-      - name: Checkout current transport source
+      - name: Checkout current CQRS v4 source
+        uses: actions/checkout@v7
+        with:
+          repository: componenta/cqrs
+          ref: main
+          path: .ci/cqrs
+      - name: Checkout current transport v5 source
         uses: actions/checkout@v7
         with:
           repository: componenta/cqrs-transport
@@ -32,11 +38,11 @@ jobs:
       - name: Configure Composer authentication
         run: composer config --global github-oauth.github.com "${{ github.token }}"
       - run: composer validate --strict
-      - name: Select current transport source
+      - name: Select current CQRS and transport sources
         shell: bash
         run: |
+          composer config --json repositories.componenta-cqrs '{"type":"path","url":".ci/cqrs","options":{"versions":{"componenta/cqrs":"4.0.0"}}}'
           composer config --json repositories.componenta-cqrs-transport '{"type":"path","url":".ci/cqrs-transport","options":{"versions":{"componenta/cqrs-transport":"5.0.0"}}}'
-          composer require --no-update componenta/cqrs-transport:5.0.0
       - name: Install dependencies
         shell: bash
         env:
@@ -65,7 +71,13 @@ jobs:
         php: ['8.4', '8.5']
     steps:
       - uses: actions/checkout@v7
-      - name: Checkout current transport source
+      - name: Checkout current CQRS v4 source
+        uses: actions/checkout@v7
+        with:
+          repository: componenta/cqrs
+          ref: main
+          path: .ci/cqrs
+      - name: Checkout current transport v5 source
         uses: actions/checkout@v7
         with:
           repository: componenta/cqrs-transport
@@ -79,11 +91,12 @@ jobs:
       - name: Configure Composer authentication
         run: composer config --global github-oauth.github.com "${{ github.token }}"
       - run: composer validate --strict
-      - name: Select current transport and minimum database version
+      - name: Select current CQRS/transport and minimum database version
         shell: bash
         run: |
+          composer config --json repositories.componenta-cqrs '{"type":"path","url":".ci/cqrs","options":{"versions":{"componenta/cqrs":"4.0.0"}}}'
           composer config --json repositories.componenta-cqrs-transport '{"type":"path","url":".ci/cqrs-transport","options":{"versions":{"componenta/cqrs-transport":"5.0.0"}}}'
-          composer require --no-update componenta/cqrs-transport:5.0.0 cycle/database:2.21.0
+          composer require --no-update cycle/database:2.21.0
       - name: Install dependencies
         run: composer update --with-all-dependencies --no-interaction --prefer-dist --no-progress
       - run: composer test
