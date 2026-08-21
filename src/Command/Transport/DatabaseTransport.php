@@ -62,13 +62,16 @@ final readonly class DatabaseTransport implements TransportInterface
     private const string TABLE = 'command_transport';
     private const string FAILED_TABLE = 'command_transport_failed';
     private const int CLAIM_ATTEMPTS = 3;
+    private const int MAX_QUEUE_BYTES = 64;
+    private const int MAX_OPERATION_ID_BYTES = 36;
+    private const int MAX_COMMAND_CLASS_BYTES = 255;
 
     /**
      * @param DatabaseInterface $database Cycle connection
      * @param string $name Transport/queue name
      * @param int $redeliverTimeout Seconds before unacknowledged message becomes available again
      *
-     * @throws InvalidArgumentException If name is empty or redeliverTimeout is not positive
+     * @throws InvalidArgumentException If adapter/schema invariants are invalid
      */
     public function __construct(
         private DatabaseInterface $database,
@@ -78,6 +81,12 @@ final readonly class DatabaseTransport implements TransportInterface
         if (trim($this->name) === '') {
             throw new InvalidArgumentException('Transport name cannot be empty');
         }
+
+        self::assertMaxBytes(
+            $this->name,
+            self::MAX_QUEUE_BYTES,
+            'Transport name',
+        );
 
         if ($this->redeliverTimeout <= 0) {
             throw new InvalidArgumentException('Redeliver timeout must be positive');
@@ -89,6 +98,8 @@ final readonly class DatabaseTransport implements TransportInterface
         if ($delay < 0) {
             throw new InvalidArgumentException('Transport delay must be non-negative.');
         }
+
+        self::assertEnvelopeIdentity($envelope);
 
         $now = $this->databaseNow();
         $availableAt = $delay > 0
@@ -231,6 +242,7 @@ final readonly class DatabaseTransport implements TransportInterface
 
     public function ack(Envelope $envelope): void
     {
+        self::assertEnvelopeIdentity($envelope);
         [$id, $leaseToken] = self::parseReceiptHandle($envelope->receiptHandle);
 
         $updated = $this->database->update(self::TABLE)
@@ -256,6 +268,7 @@ final readonly class DatabaseTransport implements TransportInterface
 
     public function reject(Envelope $envelope): void
     {
+        self::assertEnvelopeIdentity($envelope);
         [$id, $leaseToken] = self::parseReceiptHandle($envelope->receiptHandle);
         $failedAt = self::format($this->databaseNow());
 
@@ -376,6 +389,34 @@ final readonly class DatabaseTransport implements TransportInterface
             ->getDriver(DatabaseInterface::WRITE)
             ->getQueryBuilder()
             ->selectQuery($this->database->getPrefix(), [], $columns);
+    }
+
+    private static function assertEnvelopeIdentity(Envelope $envelope): void
+    {
+        self::assertMaxBytes(
+            $envelope->operationId,
+            self::MAX_OPERATION_ID_BYTES,
+            'Transport operation ID',
+        );
+        self::assertMaxBytes(
+            $envelope->commandClass,
+            self::MAX_COMMAND_CLASS_BYTES,
+            'Transport command class',
+        );
+    }
+
+    private static function assertMaxBytes(string $value, int $maximum, string $description): void
+    {
+        $length = strlen($value);
+
+        if ($length > $maximum) {
+            throw new InvalidArgumentException(sprintf(
+                '%s exceeds the reference schema limit of %d bytes; got %d bytes.',
+                $description,
+                $maximum,
+                $length,
+            ));
+        }
     }
 
     /**
