@@ -106,3 +106,38 @@ it('uses the write database clock for the redelivery cutoff', function (): void 
 
     expect($transport->get())->toBeNull();
 });
+
+it('rejects a delay that would overflow the platform timestamp before persistence', function (): void {
+    RedeliveryFixedClockSQLiteDriver::$now = '2040-01-02 03:04:05';
+    $database = redeliveryClockDatabase();
+    $transport = new DatabaseTransport($database, 'commands');
+    $envelope = new Envelope(
+        operationId: 'overflow-delay',
+        commandClass: stdClass::class,
+        payload: '{}',
+    );
+
+    expect(fn() => $transport->send($envelope, PHP_INT_MAX))
+        ->toThrow(InvalidArgumentException::class, 'Transport delay exceeds the supported timestamp range')
+        ->and($database->select()->from('command_transport')->count())->toBe(0);
+});
+
+it('does not turn an extreme redelivery timeout into an immediate future cutoff', function (): void {
+    RedeliveryFixedClockSQLiteDriver::$now = '2040-01-02 03:04:05';
+    $transport = new DatabaseTransport(
+        redeliveryClockDatabase(),
+        'commands',
+        redeliverTimeout: PHP_INT_MAX,
+    );
+    $envelope = new Envelope(
+        operationId: 'extreme-redelivery-timeout',
+        commandClass: stdClass::class,
+        payload: '{}',
+    );
+
+    $transport->send($envelope);
+    $claimed = requireRedeliveryEnvelope($transport->get());
+
+    expect($claimed->receiptHandle)->toBeString()
+        ->and($transport->get())->toBeNull();
+});
