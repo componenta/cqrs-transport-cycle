@@ -92,7 +92,7 @@ final readonly class DatabaseTransport implements TransportInterface
 
         $now = $this->databaseNow();
         $availableAt = $delay > 0
-            ? $now->modify("+{$delay} seconds")
+            ? self::shiftSeconds($now, $delay, 'Transport delay')
             : $now;
 
         $this->database->insert(self::TABLE)->values([
@@ -159,7 +159,11 @@ final readonly class DatabaseTransport implements TransportInterface
     private function getAttempt(): Envelope|false|null
     {
         $now = $this->databaseNow();
-        $redeliverLimit = self::format($now->modify("-{$this->redeliverTimeout} seconds"));
+        $redeliverLimit = self::format(self::shiftSeconds(
+            $now,
+            -$this->redeliverTimeout,
+            'Redelivery timeout',
+        ));
         $nowFormatted = self::format($now);
 
         $row = $this->writeSelect([
@@ -461,6 +465,25 @@ final readonly class DatabaseTransport implements TransportInterface
                 $value,
             ), previous: $exception);
         }
+    }
+
+    private static function shiftSeconds(
+        DateTimeImmutable $time,
+        int $seconds,
+        string $description,
+    ): DateTimeImmutable {
+        $timestamp = $time->getTimestamp();
+
+        if (($seconds > 0 && $timestamp > PHP_INT_MAX - $seconds)
+            || ($seconds < 0 && $timestamp < PHP_INT_MIN - $seconds)
+        ) {
+            throw new InvalidArgumentException(sprintf(
+                '%s exceeds the supported timestamp range.',
+                $description,
+            ));
+        }
+
+        return $time->setTimestamp($timestamp + $seconds);
     }
 
     private static function format(DateTimeImmutable $time): string
