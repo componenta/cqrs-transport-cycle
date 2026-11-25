@@ -382,7 +382,10 @@ final readonly class DatabaseTransport implements TransportInterface
         return is_array($row) && is_string($row[$column] ?? null);
     }
 
-    /** @param list<string> $columns */
+    /**
+     * @param list<string> $columns
+     * @return SelectQuery&\Traversable<array-key, mixed>
+     */
     private function writeSelect(array $columns): SelectQuery
     {
         return $this->database

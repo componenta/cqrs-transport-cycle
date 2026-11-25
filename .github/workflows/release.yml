@@ -18,17 +18,17 @@ jobs:
         php: ['8.4', '8.5']
     steps:
       - uses: actions/checkout@v7
-      - name: Checkout current CQRS v4 source
+      - name: Checkout released CQRS v4 source
         uses: actions/checkout@v7
         with:
           repository: componenta/cqrs
-          ref: main
+          ref: v4.0.0
           path: .ci/cqrs
-      - name: Checkout current transport v5 source
+      - name: Checkout released transport v5 source
         uses: actions/checkout@v7
         with:
           repository: componenta/cqrs-transport
-          ref: main
+          ref: v5.0.0
           path: .ci/cqrs-transport
       - uses: shivammathur/setup-php@v2
         with:
@@ -71,17 +71,17 @@ jobs:
         php: ['8.4', '8.5']
     steps:
       - uses: actions/checkout@v7
-      - name: Checkout current CQRS v4 source
+      - name: Checkout released CQRS v4 source
         uses: actions/checkout@v7
         with:
           repository: componenta/cqrs
-          ref: main
+          ref: v4.0.0
           path: .ci/cqrs
-      - name: Checkout current transport v5 source
+      - name: Checkout released transport v5 source
         uses: actions/checkout@v7
         with:
           repository: componenta/cqrs-transport
-          ref: main
+          ref: v5.0.0
           path: .ci/cqrs-transport
       - uses: shivammathur/setup-php@v2
         with:
@@ -123,17 +123,17 @@ jobs:
       CQRS_TRANSPORT_TEST_MYSQL_PASSWORD: root
     steps:
       - uses: actions/checkout@v7
-      - name: Checkout current CQRS v4 source
+      - name: Checkout released CQRS v4 source
         uses: actions/checkout@v7
         with:
           repository: componenta/cqrs
-          ref: main
+          ref: v4.0.0
           path: .ci/cqrs
-      - name: Checkout current transport v5 source
+      - name: Checkout released transport v5 source
         uses: actions/checkout@v7
         with:
           repository: componenta/cqrs-transport
-          ref: main
+          ref: v5.0.0
           path: .ci/cqrs-transport
       - uses: shivammathur/setup-php@v2
         with:
