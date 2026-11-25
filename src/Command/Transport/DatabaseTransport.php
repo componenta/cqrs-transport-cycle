@@ -498,6 +498,23 @@ final readonly class DatabaseTransport implements TransportInterface
         }
 
         try {
+            // DateTimeImmutable accepts relative and incomplete dates and can
+            // normalize impossible dates. A database clock must supply a
+            // complete, valid absolute timestamp, never PHP's current date.
+            $parsed = date_parse($value);
+            if ($parsed['warning_count'] !== 0
+                || $parsed['error_count'] !== 0
+                || isset($parsed['relative'])
+                || $parsed['year'] === false
+                || $parsed['month'] === false
+                || $parsed['day'] === false
+                || $parsed['hour'] === false
+                || $parsed['minute'] === false
+                || $parsed['second'] === false
+            ) {
+                throw new InvalidArgumentException('Expected a complete absolute timestamp.');
+            }
+
             return new DateTimeImmutable($value, $driver->getTimezone());
         } catch (Throwable $exception) {
             throw new TransportException(sprintf(

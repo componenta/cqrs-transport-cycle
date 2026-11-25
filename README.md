@@ -75,7 +75,7 @@ Each delivery has an opaque lease-token receipt. `ack()` and `reject()` only cha
 
 All queue consistency reads use the Cycle **write driver**, including post-send read-back, claim candidate selection, and idempotent disposition checks. They intentionally do not use `Database::select()`, because Cycle routes that API through the optional read driver and a lagging replica cannot provide the read-your-write/lease consistency required by a queue.
 
-All queue timestamps and redelivery cutoffs are derived from `CURRENT_TIMESTAMP` on the write driver. Producer and worker host clocks therefore do not participate in delayed availability, lease age, completion, or failure decisions. The write database/session timezone should remain stable; Cycle drivers use UTC by default.
+All queue timestamps and redelivery cutoffs are derived from `CURRENT_TIMESTAMP` on the write driver. Producer and worker host clocks therefore do not participate in delayed availability, lease age, completion, or failure decisions. A malformed, relative or incomplete database timestamp is rejected before a queue write; complete timestamps with fractional seconds or an explicit offset are accepted. The reference schema stores timestamps at whole-second precision. The write database/session timezone should remain stable; Cycle drivers use UTC by default.
 
 `redeliverTimeout` is the maximum expected uninterrupted processing duration, not a heartbeat interval. The transport cannot renew a lease while a synchronous PHP handler is running. Configure it above the longest handler duration; after the timeout another worker may execute the same command concurrently. Handlers must therefore remain idempotent.
 

@@ -141,3 +141,72 @@ it('does not turn an extreme redelivery timeout into an immediate future cutoff'
     expect($claimed->receiptHandle)->toBeString()
         ->and($transport->get())->toBeNull();
 });
+
+
+it('rejects malformed or relative database timestamps before persisting or changing delivery state', function (string $invalid): void {
+    $original = RedeliveryFixedClockSQLiteDriver::$now;
+    RedeliveryFixedClockSQLiteDriver::$now = '2040-01-02 03:04:05';
+    try {
+        $database = redeliveryClockDatabase();
+        $transport = new DatabaseTransport($database, 'commands');
+        $envelope = new Envelope('clock-validation', stdClass::class, '{}');
+
+        RedeliveryFixedClockSQLiteDriver::$now = $invalid;
+        expect(fn () => $transport->send($envelope))
+            ->toThrow(TransportException::class, 'invalid timestamp')
+            ->and($database->select()->from('command_transport')->count())->toBe(0);
+        expect(fn () => $transport->get())
+            ->toThrow(TransportException::class, 'invalid timestamp');
+
+        RedeliveryFixedClockSQLiteDriver::$now = '2040-01-02 03:04:05';
+        $transport->send($envelope);
+        $claimed = requireRedeliveryEnvelope($transport->get());
+        RedeliveryFixedClockSQLiteDriver::$now = $invalid;
+        expect(fn () => $transport->ack($claimed))
+            ->toThrow(TransportException::class, 'invalid timestamp')
+            ->and(fn () => $transport->reject($claimed))
+            ->toThrow(TransportException::class, 'invalid timestamp');
+        $row = $database->select(['completed_at', 'failed_at', 'lease_token'])
+            ->from('command_transport')->run()->fetch();
+        expect($row['completed_at'])->toBeNull()
+            ->and($row['failed_at'])->toBeNull()
+            ->and($row['lease_token'])->toBeString()
+            ->and($database->select()->from('command_transport_failed')->count())->toBe(0);
+
+        RedeliveryFixedClockSQLiteDriver::$now = '2040-01-02 03:04:05';
+        $transport->ack($claimed);
+        expect($transport->get())->toBeNull();
+    } finally {
+        RedeliveryFixedClockSQLiteDriver::$now = $original;
+    }
+})->with([
+    'relative date' => ['tomorrow'],
+    'time without date' => ['12:30:00'],
+    'date without time' => ['2040-01-02'],
+    'invalid calendar date' => ['2040-02-30 03:04:05'],
+    'relative adjustment' => ['2040-01-02 03:04:05 +1 day'],
+    'invalid time' => ['2040-01-02 25:04:05'],
+]);
+
+it('accepts a complete database timestamp with fractional seconds and an explicit offset', function (): void {
+    $original = RedeliveryFixedClockSQLiteDriver::$now;
+    RedeliveryFixedClockSQLiteDriver::$now = '2040-01-02 03:04:05.123456+00:00';
+    try {
+        $database = redeliveryClockDatabase();
+        $transport = new DatabaseTransport($database, 'commands');
+        $transport->send(new Envelope('fractional-clock', stdClass::class, '{}'), delay: 2);
+        expect($database->select(['created_at', 'available_at'])->from('command_transport')->run()->fetch())
+            ->toMatchArray([
+                'created_at' => '2040-01-02 03:04:05',
+                'available_at' => '2040-01-02 03:04:07',
+            ])
+            ->and($transport->get())->toBeNull();
+
+        RedeliveryFixedClockSQLiteDriver::$now = '2040-01-02 03:04:07.123456+00:00';
+        $claimed = requireRedeliveryEnvelope($transport->get());
+        $transport->ack($claimed);
+        expect($transport->get())->toBeNull();
+    } finally {
+        RedeliveryFixedClockSQLiteDriver::$now = $original;
+    }
+});
