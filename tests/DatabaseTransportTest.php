@@ -355,3 +355,45 @@ it('isolates identical operation identifiers and receipt handles across queues',
         ->and($second->get())->toBeNull()
         ->and($database->select('queue')->from('command_transport_failed')->run()->fetchColumn())->toBe('second');
 });
+
+
+it('accepts exact reference schema byte limits and rejects invalid delays and timeouts', function (): void {
+    $database = transportDatabase();
+    $transport = new DatabaseTransport($database, str_repeat('q', 64), redeliverTimeout: 1);
+    $envelope = new Envelope(str_repeat('i', 36), str_repeat('C', 255), '{}');
+    expect(fn () => new DatabaseTransport($database, ' ', 1))->toThrow(InvalidArgumentException::class, 'name cannot be empty')
+        ->and(fn () => new DatabaseTransport($database, 'commands', 0))->toThrow(InvalidArgumentException::class, 'timeout must be positive')
+        ->and(fn () => $transport->send($envelope, -1))->toThrow(InvalidArgumentException::class, 'delay must be non-negative')
+        ->and($database->select()->from('command_transport')->count())->toBe(0);
+
+    $transport->send($envelope, 0);
+    $claimed = requireDatabaseEnvelope($transport->get());
+    expect($claimed->operationId)->toBe($envelope->operationId)
+        ->and($claimed->commandClass)->toBe($envelope->commandClass);
+    $transport->ack($claimed);
+    expect($transport->get())->toBeNull();
+});
+
+it('stops after the documented bounded claim attempts and can poll the pending message again', function (): void {
+    $database = transportDatabase();
+    $transport = new DatabaseTransport($database, 'commands');
+    $transport->send(databaseEnvelope());
+    $database->execute('CREATE TABLE claim_attempts (attempts INTEGER NOT NULL)');
+    $database->execute('INSERT INTO claim_attempts VALUES (0)');
+    $database->execute(<<<'SQL'
+CREATE TRIGGER lose_transport_claim
+BEFORE UPDATE OF delivered_at ON command_transport
+WHEN (SELECT attempts FROM claim_attempts LIMIT 1) < 4
+BEGIN
+    UPDATE claim_attempts SET attempts = attempts + 1;
+    SELECT RAISE(IGNORE);
+END
+SQL);
+
+    expect($transport->get())->toBeNull()
+        ->and($database->select('attempts')->from('claim_attempts')->run()->fetchColumn())->toBe(3);
+    $claimed = requireDatabaseEnvelope($transport->get());
+    expect($database->select('attempts')->from('claim_attempts')->run()->fetchColumn())->toBe(4);
+    $transport->ack($claimed);
+    expect($transport->get())->toBeNull();
+});
