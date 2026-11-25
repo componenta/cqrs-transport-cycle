@@ -296,3 +296,62 @@ it('moves a caught failure once and keeps a failed operation tombstone with cont
         ->and($database->select('failed_at')->from('command_transport')->run()->fetchColumn())
         ->not->toBeNull();
 });
+
+it('rolls back the rejection tombstone when the dead-letter insert fails and keeps the receipt usable', function (): void {
+    $database = transportDatabase();
+    $transport = new DatabaseTransport($database, 'commands');
+    $transport->send(databaseEnvelope(contextPayload: '{"tenant":"original"}'));
+    $claimed = requireDatabaseEnvelope($transport->get());
+    $database->execute(<<<'SQL'
+CREATE TRIGGER fail_dead_letter_insert
+BEFORE INSERT ON command_transport_failed
+BEGIN
+    SELECT RAISE(ABORT, 'dead-letter insert denied');
+END
+SQL);
+    $failure = null;
+    try {
+        $transport->reject($claimed);
+    } catch (Throwable $caught) {
+        $failure = $caught;
+    }
+    expect($failure)->toBeInstanceOf(Throwable::class)
+        ->and($failure)->not->toBeInstanceOf(\Componenta\CQRS\Command\Transport\DatabaseTransportRollbackException::class)
+        ->and($failure->getMessage())->toContain('dead-letter insert denied');
+    $row = $database->select(['failed_at', 'completed_at', 'lease_token'])
+        ->from('command_transport')->run()->fetch();
+    expect($row['failed_at'])->toBeNull()
+        ->and($row['completed_at'])->toBeNull()
+        ->and($row['lease_token'])->toBeString()
+        ->and($database->select()->from('command_transport_failed')->count())->toBe(0)
+        ->and($transport->get())->toBeNull();
+
+    $database->execute('DROP TRIGGER fail_dead_letter_insert');
+    $transport->reject($claimed);
+    expect($database->select()->from('command_transport_failed')->count())->toBe(1)
+        ->and($database->select('context_payload')->from('command_transport_failed')->run()->fetchColumn())
+        ->toBe('{"tenant":"original"}')
+        ->and($transport->get())->toBeNull();
+});
+
+it('isolates identical operation identifiers and receipt handles across queues', function (): void {
+    $database = transportDatabase();
+    $first = new DatabaseTransport($database, 'first');
+    $second = new DatabaseTransport($database, 'second');
+    $first->send(databaseEnvelope(payload: '{"queue":1}'));
+    $second->send(databaseEnvelope(payload: '{"queue":2}'));
+
+    $a = requireDatabaseEnvelope($first->get());
+    $b = requireDatabaseEnvelope($second->get());
+    expect($a->payload)->toBe('{"queue":1}')
+        ->and($b->payload)->toBe('{"queue":2}')
+        ->and($a->receiptHandle)->not->toBe($b->receiptHandle)
+        ->and(fn () => $first->ack($b))->toThrow(TransportException::class, 'stale or invalid')
+        ->and(fn () => $second->reject($a))->toThrow(TransportException::class, 'stale or invalid');
+
+    $first->ack($a);
+    $second->reject($b);
+    expect($first->get())->toBeNull()
+        ->and($second->get())->toBeNull()
+        ->and($database->select('queue')->from('command_transport_failed')->run()->fetchColumn())->toBe('second');
+});
