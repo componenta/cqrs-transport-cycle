@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Componenta\CQRS\Command\Transport;
 
 use Cycle\Database\DatabaseInterface;
+use Cycle\Database\Query\BuilderInterface;
 use Cycle\Database\Query\OnConflict;
 use Cycle\Database\Query\SelectQuery;
 use DateTimeImmutable;
@@ -122,7 +123,7 @@ final readonly class DatabaseTransport implements TransportInterface
             OnConflict::target(['queue', 'operation_id'])->doNothing(),
         )->run();
 
-        $row = $this->writeSelect(['id', 'command_class', 'payload', 'context_payload'])
+        $row = $this->writeQueryBuilder()->selectQuery($this->database->getPrefix(), [], ['id', 'command_class', 'payload', 'context_payload'])
             ->from(self::TABLE)
             ->where('queue', $this->name)
             ->where('operation_id', $envelope->operationId)
@@ -177,7 +178,7 @@ final readonly class DatabaseTransport implements TransportInterface
         ));
         $nowFormatted = self::format($now);
 
-        $row = $this->writeSelect([
+        $row = $this->writeQueryBuilder()->selectQuery($this->database->getPrefix(), [], [
             'id',
             'operation_id',
             'command_class',
@@ -367,7 +368,7 @@ final readonly class DatabaseTransport implements TransportInterface
 
     private function hasDisposition(string $id, Envelope $envelope, string $column): bool
     {
-        $row = $this->writeSelect([$column])
+        $row = $this->writeQueryBuilder()->selectQuery($this->database->getPrefix(), [], [$column])
             ->from(self::TABLE)
             ->where('id', $id)
             ->where('queue', $this->name)
@@ -382,16 +383,11 @@ final readonly class DatabaseTransport implements TransportInterface
         return is_array($row) && is_string($row[$column] ?? null);
     }
 
-    /**
-     * @param list<string> $columns
-     * @return SelectQuery&\Traversable<array-key, mixed>
-     */
-    private function writeSelect(array $columns): SelectQuery
+    private function writeQueryBuilder(): BuilderInterface
     {
         return $this->database
             ->getDriver(DatabaseInterface::WRITE)
-            ->getQueryBuilder()
-            ->selectQuery($this->database->getPrefix(), [], $columns);
+            ->getQueryBuilder();
     }
 
     private static function assertEnvelopeIdentity(Envelope $envelope): void
